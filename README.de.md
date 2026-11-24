@@ -14,6 +14,7 @@ Wenn Autodarts headless auf einem Raspberry Pi (oder einem anderen Linux-Rechner
 - **Live**: Jede Änderung wird sofort übernommen, das Ergebnis siehst du direkt in der Autodarts-Oberfläche. Ein Button öffnet sie in einem neuen Tab.
 - **Dauerhaft**: Nach *Speichern* werden die Einstellungen nach jedem Neustart und beim erneuten Anstecken einer Kamera automatisch wieder gesetzt.
 - **Stabile Kamera-Zuordnung über den USB-Port**: Die Einstellungen bleiben bei der richtigen Kamera, auch wenn sich die `/dev/videoX`-Nummern ändern.
+- **Arbeitet mit Autodarts zusammen**: *Speichern* schreibt die Werte auch in die eigenen Kameraeinstellungen von Autodarts (`[cam_controls]` in dessen `config.toml`), sodass Autodarts sie beim Start verwendet. Die Kameras sind wie in Autodarts nummeriert.
 - **Auf andere Kameras kopieren**: eine Kamera einstellen und die Werte mit einem Klick auf die anderen übertragen.
 - **Werkseinstellungen** pro Kamera und ein Reset-Button pro Regler.
 - **Oberfläche auf Englisch, Deutsch und Ungarisch**. Die Sprache wird automatisch erkannt und lässt sich oben umschalten.
@@ -95,6 +96,16 @@ cams = ["/dev/v4l/by-path/…-usb-0:1.2:1.0-video-index0", "/dev/v4l/by-path/…
 
 Die Reihenfolge der Kameras beibehalten und jede Kamera im selben USB-Port lassen. Diese Kamera-Konfiguration erkennt die Kameras bereits über den USB-Port.
 
+## Autodarts-Integration
+
+Autodarts hat eigene Kamerasteuerungen: Es speichert sie in `~/.config/autodarts/config.toml` (`[cam_controls]`) und setzt sie beim Start. Damit sich beide nicht gegenseitig überschreiben:
+
+- **Speichern** schickt die Werte jeder von Autodarts genutzten Kamera an die Autodarts-Board-API (`http://localhost:3180`). Autodarts setzt sie und schreibt sie selbst in seine Konfiguration.
+- Für diese Kameras gelten die von Autodarts gespeicherten Werte als gespeicherter Stand. Dieses Tool setzt beim Start nicht seine eigene Kopie, und **Gespeicherte laden** lädt sie aus der Autodarts-Konfiguration.
+- Kameras, die Autodarts nicht nutzt, verwaltet nur dieses Tool.
+
+Mit `CAMCTL_AUTODARTS_SYNC=0` lässt sich die Integration abschalten.
+
 ## Aktualisieren
 
 Den Installationsbefehl einfach erneut ausführen. Die gespeicherten Einstellungen bleiben erhalten.
@@ -127,6 +138,9 @@ Umgebungsvariablen, im systemd-Dienst setzen mit `sudo systemctl edit autodarts-
 | `CAMCTL_CONF` | `settings.json` neben dem Skript | Speicherort der Einstellungen |
 | `CAMCTL_APPLY_DELAY` | `45` | Sekunden nach dem Start, bevor gespeicherte Werte gesetzt werden |
 | `CAMCTL_ALL` | – | `1` = alle Capture-Geräte anzeigen, nicht nur USB-Kameras |
+| `CAMCTL_AUTODARTS_URL` | `http://localhost:3180` | Autodarts-Board-API |
+| `CAMCTL_AUTODARTS_CONFIG` | `~/.config/autodarts/config.toml` | Autodarts-Konfigurationsdatei |
+| `CAMCTL_AUTODARTS_SYNC` | `1` | `0` = nicht mit Autodarts synchronisieren |
 
 ## Sicherheitshinweis
 
@@ -134,7 +148,7 @@ Die Seite hat kein Login. Jeder im lokalen Netzwerk, der die Adresse kennt, kann
 
 ## Haftungsausschluss
 
-Inoffizielles Community-Tool, nicht mit Autodarts verbunden oder von Autodarts unterstützt. Es ändert nur Kameraeinstellungen über die Standard-Linux-Schnittstelle V4L2. Dateien oder die Konfiguration von Autodarts werden nie verändert.
+Inoffizielles Community-Tool, nicht mit Autodarts verbunden oder von Autodarts unterstützt. Es ändert nur Kameraeinstellungen über die Standard-Linux-Schnittstelle V4L2. Mit Autodarts interagiert es nur, indem es Kameraeinstellungen über die Autodarts-Board-API sendet, genau wie die Autodarts-Oberfläche selbst.
 
 ## Lizenz
 

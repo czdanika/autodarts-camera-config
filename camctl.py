@@ -12,6 +12,14 @@ Environment variables:
   CAMCTL_CONF         settings file (default: settings.json next to this script)
   CAMCTL_APPLY_DELAY  seconds to wait after start before applying saved settings (default: 45)
   CAMCTL_ALL=1        list every capture device, not only USB (uvcvideo) cameras
+  CAMCTL_AUTODARTS_URL     Autodarts board API (default: http://localhost:3180)
+  CAMCTL_AUTODARTS_CONFIG  Autodarts config file (default: ~/.config/autodarts/config.toml)
+  CAMCTL_AUTODARTS_SYNC=0  do not sync with Autodarts
+
+Autodarts integration: Autodarts keeps its own camera controls ([cam_controls] in
+config.toml) and applies them when it starts. When a camera is used by Autodarts,
+"Save" also sends the values to Autodarts (which stores them in its config), and the
+values stored by Autodarts are treated as the saved state for that camera.
 """
 import glob
 import json
@@ -21,6 +29,7 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse
 
@@ -31,6 +40,9 @@ CONF = os.environ.get(
 )
 APPLY_DELAY = int(os.environ.get("CAMCTL_APPLY_DELAY", "45"))
 SHOW_ALL = os.environ.get("CAMCTL_ALL") == "1"
+AD_URL = os.environ.get("CAMCTL_AUTODARTS_URL", "http://localhost:3180").rstrip("/")
+AD_CONF = os.path.expanduser(os.environ.get("CAMCTL_AUTODARTS_CONFIG", "~/.config/autodarts/config.toml"))
+AD_SYNC = os.environ.get("CAMCTL_AUTODARTS_SYNC", "1") != "0"
 
 LOCK = threading.Lock()
 CTRL_RE = re.compile(r"^\s*(\w+)\s+0x[0-9a-fA-F]+\s+\((\w+)\)\s*:\s*(.*)$")
@@ -167,11 +179,114 @@ def apply_values(dev, values):
         key=lambda n: 0 if ctrls[n]["type"] in ("bool", "menu", "intmenu") else 1,
     )
     errors = []
+    autos = [n for n in order if ctrls[n]["type"] in ("bool", "menu", "intmenu")]
+    for n in autos:
+        ok, err = set_ctrl(dev, n, values[n])
+        if not ok:
+            errors.append(f"{n}: {err}")
+    # re-read: controls driven by an auto mode are now inactive and cannot be set
+    inactive = {c["name"] for c in list_ctrls(dev) if c["inactive"]} if autos else set()
     for n in order:
+        if n in autos or n in inactive:
+            continue
         ok, err = set_ctrl(dev, n, values[n])
         if not ok:
             errors.append(f"{n}: {err}")
     return errors
+
+
+# ---------------------------------------------------------------- Autodarts integration
+
+# v4l2 control name -> Autodarts control name (others: snake_case -> camelCase)
+AD_NAMES = {
+    "white_balance_automatic": "autoWhiteBalance",
+    "white_balance_temperature_auto": "autoWhiteBalance",
+    "white_balance_temperature": "whiteBalanceTemperature",
+    "auto_exposure": "exposureAuto",
+    "exposure_auto": "exposureAuto",
+    "exposure_time_absolute": "exposureAbsolute",
+    "exposure_absolute": "exposureAbsolute",
+    "exposure_dynamic_framerate": "exposureAutoPriority",
+    "exposure_auto_priority": "exposureAutoPriority",
+}
+
+
+def ad_name(name):
+    return AD_NAMES.get(name) or re.sub(r"_(\w)", lambda m: m.group(1).upper(), name)
+
+
+def ad_request(method, path, body=None, timeout=4):
+    data = json.dumps(body).encode() if body is not None else None
+    req = urllib.request.Request(AD_URL + "/api" + path, data=data, method=method,
+                                 headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        raw = r.read()
+    return json.loads(raw) if raw.strip() else None
+
+
+def ad_read_config():
+    """Autodarts config.toml as a dict, or None (missing file / Python < 3.11)."""
+    try:
+        import tomllib
+        with open(AD_CONF, "rb") as f:
+            return tomllib.load(f)
+    except Exception:
+        return None
+
+
+def ad_cam_index():
+    """{realpath of camera device: Autodarts camera index}. Empty if Autodarts is not found."""
+    if not AD_SYNC:
+        return {}
+    cams = None
+    try:
+        cams = ad_request("GET", "/config")["cam"]["cams"]
+    except Exception:
+        conf = ad_read_config()
+        if conf:
+            cams = conf.get("cam", {}).get("cams")
+    return {os.path.realpath(c): i for i, c in enumerate(cams or [])}
+
+
+def ad_saved_values(idx, ctrls):
+    """Values Autodarts has stored for camera idx, as {v4l2 name: value}.
+    Controls Autodarts has not stored are at their default. None if unreadable."""
+    conf = ad_read_config()
+    if conf is None:
+        return None
+    stored = conf.get("cam_controls", {}).get(str(idx), {})
+    vals = {}
+    for c in ctrls:
+        if c["readonly"]:
+            continue
+        k = ad_name(c["name"])
+        if k in stored:
+            vals[c["name"]] = int(stored[k])
+        elif "default" in c:
+            vals[c["name"]] = c["default"]
+    return vals
+
+
+def ad_push(idx, values, ctrls):
+    """Send values to Autodarts; it applies them and stores them in config.toml.
+    Returns an error string or None."""
+    try:
+        known = ad_request("GET", f"/cams/controls/{idx}") or {}
+    except Exception as e:
+        return f"autodarts_unreachable ({e})"
+    types = {c["name"]: c["type"] for c in ctrls}
+    autos, rest = {}, {}
+    for n, v in values.items():
+        k = ad_name(n)
+        if k in known:
+            (autos if types.get(n) in ("bool", "menu", "intmenu") else rest)[k] = int(v)
+    try:
+        for part in (autos, rest):  # auto switches first, like apply_values()
+            if part:
+                ad_request("PATCH", f"/cams/controls/{idx}", part)
+    except Exception as e:
+        return f"autodarts_unreachable ({e})"
+    return None
 
 
 # ---------------------------------------------------------------- persistence
@@ -196,11 +311,20 @@ def current_values(dev):
             if not c["readonly"] and "value" in c}
 
 
-def apply_saved():
+def apply_saved(include_autodarts=False):
+    """Apply saved settings. Cameras used by Autodarts are skipped unless
+    include_autodarts=True (Autodarts applies its own stored values when it starts);
+    for those, the values stored in the Autodarts config are used."""
     conf = load_conf()
+    idx = ad_cam_index()
     report = {}
     for cam in discover(force=True):
+        i = idx.get(os.path.realpath(cam["dev"]))
         vals = conf.get(cam["key"])
+        if i is not None:
+            if not include_autodarts:
+                continue
+            vals = ad_saved_values(i, list_ctrls(cam["dev"])) or vals
         if vals:
             errs = apply_values(cam["dev"], vals)
             report[cam["key"]] = errs
@@ -229,9 +353,13 @@ def watcher():
 
 def cams_payload():
     conf = load_conf()
+    idx = ad_cam_index()
     out = []
     for cam in discover():
-        out.append({**cam, "ctrls": list_ctrls(cam["dev"]), "saved": cam["key"] in conf})
+        i = idx.get(os.path.realpath(cam["dev"]))
+        out.append({**cam, "ctrls": list_ctrls(cam["dev"]), "saved": cam["key"] in conf, "ad": i})
+    # same order and numbering as in Autodarts; other cameras after them
+    out.sort(key=lambda c: (c["ad"] is None, c["ad"] if c["ad"] is not None else 0))
     return out
 
 
@@ -314,13 +442,24 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/api/save":
             conf = load_conf()
+            idx = ad_cam_index()
+            errs, synced = [], 0
             for cam in discover(force=True):
-                conf[cam["key"]] = current_values(cam["dev"])
+                ctrls = list_ctrls(cam["dev"])
+                vals = {c["name"]: c["value"] for c in ctrls if not c["readonly"] and "value" in c}
+                conf[cam["key"]] = vals
+                i = idx.get(os.path.realpath(cam["dev"]))
+                if i is not None:
+                    e = ad_push(i, vals, ctrls)
+                    if e:
+                        errs.append(e)
+                    else:
+                        synced += 1
             save_conf(conf)
-            return {"ok": True}
+            return {"ok": not errs, "error": "; ".join(dict.fromkeys(errs)), "autodarts": synced}
 
         if path == "/api/apply":
-            rep = apply_saved()
+            rep = apply_saved(include_autodarts=True)
             errs = [e for v in rep.values() for e in v]
             return {"ok": not errs, "error": "; ".join(errs), "applied": len(rep)}
 
@@ -372,7 +511,7 @@ input[type=range]:disabled{cursor:not-allowed}
 .sw input:checked{background:var(--blue)}.sw input:checked::after{transform:translateX(16px)}
 .rst{width:32px;padding:0;background:transparent;color:var(--mut);font-size:16px}
 .badge{display:inline-block;padding:0 4px;border-radius:2px;font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.02em;background:rgba(226,232,240,.16);color:#E2E8F0}
-.badge.s{background:rgba(154,230,180,.16);color:#9AE6B4}.badge.w{background:rgba(251,211,141,.16);color:#FBD38D}
+.badge.a{background:rgba(144,205,244,.16);color:#90CDF4;text-transform:none}.badge.s{background:rgba(154,230,180,.16);color:#9AE6B4}.badge.w{background:rgba(251,211,141,.16);color:#FBD38D}
 #toast{position:fixed;bottom:24px;left:50%;transform:translate(-50%,8px);padding:12px 16px;border-radius:6px;background:#90CDF4;color:#1A202C;font-size:14px;font-weight:600;box-shadow:0 10px 15px -3px rgba(0,0,0,.1),0 4px 6px -2px rgba(0,0,0,.05);opacity:0;transition:.2s;pointer-events:none;max-width:90vw}
 #toast.on{opacity:1;transform:translate(-50%,0)}#toast.ok{background:#9AE6B4}#toast.err{background:#FC8181}
 .lang{width:auto;height:32px;padding:0 8px;margin-right:4px;border:1px solid var(--line);border-radius:6px;background:transparent;color:var(--txt);font:600 14px "Open Sans",sans-serif}.lang option{background:#2D3748}
@@ -394,7 +533,7 @@ input[type=range]:disabled{cursor:not-allowed}
 <script>
 const I18N={
 en:{title:"Camera Config",refresh:"Refresh",reload:"Reload saved",open_ad:"Open Autodarts",save:"Save",loading:"Loading…",
- camera:n=>`Camera ${n}`,saved:"Saved",not_saved:"Not saved",unsaved:"Unsaved changes",usb:"USB port",defaults:"Factory defaults",copy:"Copy to other cameras",
+ camera:n=>`Camera ${n}`,ad_saved:n=>`Saved – also stored in Autodarts (${n} camera${n==1?"":"s"})`,ad_fail:"Saved here, but could not write to Autodarts",ad_tag:"in Autodarts",saved:"Saved",not_saved:"Not saved",unsaved:"Unsaved changes",usb:"USB port",defaults:"Factory defaults",copy:"Copy to other cameras",
  def:"default",auto:"set by auto mode",reset:"Reset to default",no_cams:"No USB cameras found. Are they connected? (v4l2-ctl --list-devices)",
  no_server:"Cannot reach the server",failed:"Failed",saved_ok:"Saved – these settings survive a reboot",save_fail:"Saving failed",
  applied:n=>`Saved settings loaded (${n} camera${n==1?"":"s"})`,partial:"Partly failed",defaults_ok:"Factory defaults restored",
@@ -407,7 +546,7 @@ en:{title:"Camera Config",refresh:"Refresh",reload:"Reload saved",open_ad:"Open 
  exposure_auto_priority:"Dynamic frame rate",focus_automatic_continuous:"Continuous autofocus",focus_auto:"Autofocus",focus_absolute:"Focus",
  zoom_absolute:"Zoom",pan_absolute:"Pan",tilt_absolute:"Tilt"}},
 de:{title:"Kamera-Konfiguration",refresh:"Aktualisieren",reload:"Gespeicherte laden",open_ad:"Autodarts öffnen",save:"Speichern",loading:"Wird geladen…",
- camera:n=>`Kamera ${n}`,saved:"Gespeichert",not_saved:"Nicht gespeichert",unsaved:"Ungespeicherte Änderungen",usb:"USB-Port",defaults:"Werkseinstellungen",copy:"Auf andere Kameras kopieren",
+ camera:n=>`Kamera ${n}`,ad_saved:n=>`Gespeichert – auch in Autodarts übernommen (${n} Kamera${n==1?"":"s"})`,ad_fail:"Hier gespeichert, aber Autodarts nicht erreichbar",ad_tag:"in Autodarts",saved:"Gespeichert",not_saved:"Nicht gespeichert",unsaved:"Ungespeicherte Änderungen",usb:"USB-Port",defaults:"Werkseinstellungen",copy:"Auf andere Kameras kopieren",
  def:"Standard",auto:"durch Automatik gesteuert",reset:"Auf Standard zurücksetzen",no_cams:"Keine USB-Kameras gefunden. Sind sie angeschlossen? (v4l2-ctl --list-devices)",
  no_server:"Server nicht erreichbar",failed:"Fehlgeschlagen",saved_ok:"Gespeichert – bleibt auch nach einem Neustart erhalten",save_fail:"Speichern fehlgeschlagen",
  applied:n=>`Gespeicherte Einstellungen geladen (${n} Kamera${n==1?"":"s"})`,partial:"Teilweise fehlgeschlagen",defaults_ok:"Werkseinstellungen wiederhergestellt",
@@ -420,7 +559,7 @@ de:{title:"Kamera-Konfiguration",refresh:"Aktualisieren",reload:"Gespeicherte la
  exposure_auto_priority:"Dynamische Bildrate",focus_automatic_continuous:"Kontinuierlicher Autofokus",focus_auto:"Autofokus",focus_absolute:"Fokus",
  zoom_absolute:"Zoom",pan_absolute:"Schwenken",tilt_absolute:"Neigen"}},
 hu:{title:"Kamerabeállítások",refresh:"Frissítés",reload:"Mentett visszatöltése",open_ad:"Autodarts megnyitása",save:"Mentés",loading:"Betöltés…",
- camera:n=>`${n}. kamera`,saved:"Mentve",not_saved:"Nincs mentve",unsaved:"Nem mentett változás",usb:"USB port",defaults:"Gyári értékek",copy:"Másolás a többi kamerára",
+ camera:n=>`${n}. kamera`,ad_saved:n=>`Elmentve, az Autodarts-ba is beírva (${n} kamera)`,ad_fail:"Itt elmentve, de az Autodarts-ba nem sikerült beírni",ad_tag:"Autodarts-ban",saved:"Mentve",not_saved:"Nincs mentve",unsaved:"Nem mentett változás",usb:"USB port",defaults:"Gyári értékek",copy:"Másolás a többi kamerára",
  def:"alap",auto:"automata módban",reset:"Alapérték",no_cams:"Nem találok USB kamerát. Csatlakoztatva vannak? (v4l2-ctl --list-devices)",
  no_server:"Nem érem el a szervert",failed:"Nem sikerült",saved_ok:"Elmentve, újraindítás után is ezek maradnak",save_fail:"Mentés sikertelen",
  applied:n=>`Mentett értékek betöltve (${n} kamera)`,partial:"Részben sikertelen",defaults_ok:"Gyári értékek visszaállítva",
@@ -450,8 +589,8 @@ function render(){
   const m=$("#cams");if(CAMS===null)return;
   if(!CAMS.length){m.innerHTML=`<div class="empty">${esc(t("no_cams"))}</div>`;return}
   m.innerHTML=CAMS.map((c,i)=>`<section class="card" data-key="${esc(c.key)}">
-    <h2>${esc(t("camera",i+1))} <span class="badge ${c.saved?"s":""}">${esc(c.saved?t("saved"):t("not_saved"))}</span></h2>
-    <div class="sub">${esc(c.label)} · ${esc(c.dev)}${c.port?" · "+esc(t("usb"))+" "+esc(c.port):""}</div>
+    <h2>${esc(t("camera",c.ad!=null?c.ad+1:i+1))} <span class="badge ${c.saved?"s":""}">${esc(c.saved?t("saved"):t("not_saved"))}</span></h2>
+    <div class="sub">${c.ad!=null?`<span class="badge a">${esc(t("ad_tag"))}</span> `:""}${esc(c.label)} · ${esc(c.dev)}${c.port?" · "+esc(t("usb"))+" "+esc(c.port):""}</div>
     <div class="tools"><button class="outline" onclick="defaults(this)">${esc(t("defaults"))}</button>
     <button class="outline" onclick="copyAll(this)">${esc(t("copy"))}</button></div>
     <div class="ctrls">${c.ctrls.filter(x=>!x.readonly).map(ctrlHtml).join("")}</div></section>`).join("");
@@ -480,7 +619,9 @@ function refresh(card,ctrls){
     const tmp=document.createElement("div");tmp.innerHTML=ctrlHtml(x);row.replaceWith(tmp.firstElementChild)})}
 function markUnsaved(card){const b=card.querySelector(".badge");b.className="badge w";b.textContent=t("unsaved");
   const cam=CAMS.find(c=>c.key===card.dataset.key);if(cam)cam.saved=false}
-async function save(){const r=await api("/api/save",{});r.ok?toast(t("saved_ok"),"ok"):toast(t("save_fail"),"err");load()}
+async function save(){const r=await api("/api/save",{});
+  if(r.ok)toast(r.autodarts?t("ad_saved",r.autodarts):t("saved_ok"),"ok");
+  else if(r.error&&r.error.startsWith("autodarts"))toast(t("ad_fail"),"err");else toast(t("save_fail"),"err");load()}
 async function applySaved(){const r=await api("/api/apply",{});r.ok?toast(t("applied",r.applied),"ok"):toast(t("partial")+": "+errText(r.error),"err");load()}
 async function defaults(el){const r=await api("/api/defaults",{key:keyOf(el)});r.ok?toast(t("defaults_ok"),"ok"):toast(errText(r.error),"err");load()}
 async function copyAll(el){if(!confirm(t("copy_q")))return;

@@ -14,6 +14,7 @@ If your Autodarts runs headless on a Raspberry Pi (or any Linux box), adjusting 
 - **Live**: every change is applied immediately, so you can watch the result in the Autodarts UI. A button opens it in a new tab.
 - **Persistent**: hit *Save* and the settings are re-applied automatically after a reboot or when a camera is re-plugged.
 - **Stable camera identification by USB port**, so the settings stay with the right camera even if `/dev/videoX` numbers change.
+- **Works together with Autodarts**: *Save* also writes the values into Autodarts' own camera settings (`[cam_controls]` in its `config.toml`), so Autodarts uses them when it starts. Cameras are numbered the same way as in Autodarts.
 - **Copy to other cameras**: tune one camera, then copy its settings to the other cameras with one click.
 - **Factory defaults** per camera, and a reset button per setting.
 - **English, German and Hungarian UI**. The language is detected from your browser and can be switched in the header.
@@ -95,6 +96,16 @@ cams = ["/dev/v4l/by-path/…-usb-0:1.2:1.0-video-index0", "/dev/v4l/by-path/…
 
 Keep the cameras in the same order as before, and keep each camera plugged into the same USB port. This Camera Config tool already identifies cameras by USB port.
 
+## Autodarts integration
+
+Autodarts has its own camera controls: it stores them in `~/.config/autodarts/config.toml` (`[cam_controls]`) and applies them when it starts. To keep the two from overriding each other:
+
+- **Save** sends the values of every camera that Autodarts uses to the Autodarts board API (`http://localhost:3180`). Autodarts applies them and writes them into its config itself.
+- For these cameras, the values stored by Autodarts count as the saved state. This tool does not apply its own copy at boot, and **Reload saved** loads them from the Autodarts config.
+- Cameras that Autodarts does not use are handled by this tool alone.
+
+Set `CAMCTL_AUTODARTS_SYNC=0` to turn the integration off.
+
 ## Updating
 
 Run the install command again. Your saved settings are kept.
@@ -127,6 +138,9 @@ Environment variables, set in the systemd unit with `sudo systemctl edit autodar
 | `CAMCTL_CONF` | `settings.json` next to the script | Where saved settings are stored |
 | `CAMCTL_APPLY_DELAY` | `45` | Seconds to wait after start before applying saved settings |
 | `CAMCTL_ALL` | – | `1` = list every capture device, not only USB cameras |
+| `CAMCTL_AUTODARTS_URL` | `http://localhost:3180` | Autodarts board API |
+| `CAMCTL_AUTODARTS_CONFIG` | `~/.config/autodarts/config.toml` | Autodarts config file |
+| `CAMCTL_AUTODARTS_SYNC` | `1` | `0` = do not sync with Autodarts |
 
 ## Security note
 
@@ -134,7 +148,7 @@ The page has no login. Anyone on your local network who knows the address can ch
 
 ## Disclaimer
 
-This is an unofficial community tool. It is not affiliated with or endorsed by Autodarts. It only changes camera settings through the standard Linux V4L2 interface. It never modifies Autodarts files or its configuration.
+This is an unofficial community tool. It is not affiliated with or endorsed by Autodarts. It only changes camera settings through the standard Linux V4L2 interface. Its only interaction with Autodarts is sending camera settings through the Autodarts board API, as the Autodarts UI itself does.
 
 ## License
 

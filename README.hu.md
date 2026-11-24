@@ -14,6 +14,7 @@ Ha az Autodarts headless fut egy Raspberry Pi-n (vagy más linuxos gépen), a ka
 - **Élő állítás**: minden változás azonnal érvényesül, így az Autodarts felületén rögtön látod az eredményt. Egy gomb új lapon meg is nyitja.
 - **Megmarad**: a *Mentés* után a beállításokat minden újraindításkor, és ha egy kamera újracsatlakozik, magától visszaállítja.
 - **USB-port alapú azonosítás**: a beállítás akkor is a megfelelő kamerához kerül, ha a `/dev/videoX` sorszámok megváltoznak.
+- **Együttműködik az Autodarts-szal**: a *Mentés* az értékeket az Autodarts saját kamerabeállításaiba is beírja (a `config.toml` `[cam_controls]` részébe), így az Autodarts induláskor ezeket használja. A kamerák számozása megegyezik az Autodarts-éval.
 - **Másolás a többi kamerára**: egy kamerát beállítasz, és egy kattintással átmásolod az értékeit a többire.
 - **Gyári értékek** kameránként, és minden beállításnál egy visszaállító gomb.
 - **Angol, német és magyar felület**. A nyelvet a böngésző alapján választja ki, és fent át lehet váltani.
@@ -95,6 +96,16 @@ cams = ["/dev/v4l/by-path/…-usb-0:1.2:1.0-video-index0", "/dev/v4l/by-path/…
 
 A kamerák sorrendje maradjon a régi, és mindegyik kamera maradjon ugyanabban az USB-portban. Ez a kamerakonfigurátor már eleve USB-port alapján azonosítja a kamerákat.
 
+## Autodarts-integráció
+
+Az Autodarts-nak saját kamerabeállításai vannak: a `~/.config/autodarts/config.toml` `[cam_controls]` részében tárolja, és induláskor alkalmazza őket. Hogy a kettő ne írja felül egymást:
+
+- A **Mentés** minden olyan kamera értékeit, amelyet az Autodarts használ, elküldi az Autodarts board API-jának (`http://localhost:3180`). Az Autodarts alkalmazza és maga írja be őket a konfigjába.
+- Ezeknél a kameráknál az Autodarts-ban tárolt értékek számítanak mentett állapotnak. Az eszköz induláskor nem a saját másolatát alkalmazza, és a **Mentett visszatöltése** is az Autodarts konfigjából tölt.
+- Azokat a kamerákat, amelyeket az Autodarts nem használ, csak ez az eszköz kezeli.
+
+Kikapcsolni a `CAMCTL_AUTODARTS_SYNC=0` beállítással lehet.
+
 ## Frissítés
 
 Futtasd újra a telepítő parancsot. A mentett beállítások megmaradnak.
@@ -127,6 +138,9 @@ Környezeti változók, a systemd service-ben állíthatók: `sudo systemctl edi
 | `CAMCTL_CONF` | `settings.json` a script mellett | A mentett beállítások helye |
 | `CAMCTL_APPLY_DELAY` | `45` | Indulás után ennyi másodperccel állítja vissza a mentett értékeket |
 | `CAMCTL_ALL` | – | `1` = minden capture eszközt mutat, nem csak az USB kamerákat |
+| `CAMCTL_AUTODARTS_URL` | `http://localhost:3180` | Autodarts board API |
+| `CAMCTL_AUTODARTS_CONFIG` | `~/.config/autodarts/config.toml` | Az Autodarts konfigfájlja |
+| `CAMCTL_AUTODARTS_SYNC` | `1` | `0` = nem szinkronizál az Autodarts-szal |
 
 ## Biztonság
 
@@ -134,7 +148,7 @@ Az oldalon nincs bejelentkezés. A helyi hálózaton bárki átállíthatja a ka
 
 ## Jogi nyilatkozat
 
-Nem hivatalos, közösségi eszköz, nem kapcsolódik az Autodarts-hoz, és az Autodarts nem támogatja. Csak a kamerák beállításait módosítja, a szabványos Linux V4L2 felületen keresztül. Az Autodarts fájljaihoz és beállításaihoz nem nyúl.
+Nem hivatalos, közösségi eszköz, nem kapcsolódik az Autodarts-hoz, és az Autodarts nem támogatja. Csak a kamerák beállításait módosítja, a szabványos Linux V4L2 felületen keresztül. Az Autodarts-szal csak annyiban érintkezik, hogy a kamerabeállításokat az Autodarts board API-ján keresztül küldi el, ugyanúgy, ahogy az Autodarts saját felülete is.
 
 ## Licenc
 
