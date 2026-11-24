@@ -76,6 +76,25 @@ python3 camctl.py          # → http://<pi-ip>:8088
 
 A **Mentett visszatöltése** gomb minden kamerát a legutóbb mentett állapotra állít vissza, például ha kísérletezés közben elállítottál valamit.
 
+## Tipp: stabil kameraútvonalak az Autodarts-ban
+
+Ha egy kamera egy pillanatra lecsatlakozik az USB-ről (laza kábel, tápingadozás), a Linux **új** sorszámot ad neki, pl. `/dev/video4`-ből `/dev/video6` lesz. Ilyenkor az Autodarts-ban az a kamera fekete, és a kalibráció sem sikerül. Ezt úgy kerülheted el, hogy a `/dev/videoX` helyett a stabil, USB-port alapú útvonalakat adod meg:
+
+```bash
+ls /dev/v4l/by-path/ | grep usb | grep index0     # kameránként egy sor
+sudo systemctl stop autodarts
+cp ~/.config/autodarts/config.toml ~/.config/autodarts/config.toml.bak
+nano ~/.config/autodarts/config.toml               # a [cam] alatti  cams = [...]  sort írd át
+sudo systemctl start autodarts
+```
+
+```toml
+[cam]
+cams = ["/dev/v4l/by-path/…-usb-0:1.2:1.0-video-index0", "/dev/v4l/by-path/…-usb-0:1.3:1.0-video-index0", "/dev/v4l/by-path/…-usb-0:1.4:1.0-video-index0"]
+```
+
+A kamerák sorrendje maradjon a régi, és mindegyik kamera maradjon ugyanabban az USB-portban. Ez a kamerakonfigurátor már eleve USB-port alapján azonosítja a kamerákat.
+
 ## Frissítés
 
 Futtasd újra a telepítő parancsot. A mentett beállítások megmaradnak.

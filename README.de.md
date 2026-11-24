@@ -76,6 +76,25 @@ python3 camctl.py          # → http://<pi-ip>:8088
 
 **Gespeicherte laden** setzt alle Kameras auf den zuletzt gespeicherten Stand zurück, zum Beispiel nach missglückten Experimenten.
 
+## Tipp: stabile Kamerapfade in Autodarts
+
+Fällt eine Kamera kurz vom USB ab (Wackelkontakt, Spannungseinbruch), vergibt Linux eine **neue** Nummer, z. B. wird `/dev/video4` zu `/dev/video6`. Autodarts zeigt dann für diese Kamera ein schwarzes Bild und die Kalibrierung schlägt fehl. Abhilfe: statt `/dev/videoX` die stabilen, USB-Port-basierten Pfade eintragen:
+
+```bash
+ls /dev/v4l/by-path/ | grep usb | grep index0     # eine Zeile pro Kamera
+sudo systemctl stop autodarts
+cp ~/.config/autodarts/config.toml ~/.config/autodarts/config.toml.bak
+nano ~/.config/autodarts/config.toml               # Zeile  cams = [...]  unter [cam] anpassen
+sudo systemctl start autodarts
+```
+
+```toml
+[cam]
+cams = ["/dev/v4l/by-path/…-usb-0:1.2:1.0-video-index0", "/dev/v4l/by-path/…-usb-0:1.3:1.0-video-index0", "/dev/v4l/by-path/…-usb-0:1.4:1.0-video-index0"]
+```
+
+Die Reihenfolge der Kameras beibehalten und jede Kamera im selben USB-Port lassen. Diese Kamera-Konfiguration erkennt die Kameras bereits über den USB-Port.
+
 ## Aktualisieren
 
 Den Installationsbefehl einfach erneut ausführen. Die gespeicherten Einstellungen bleiben erhalten.
